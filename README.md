@@ -9,12 +9,12 @@ CREATE (p:Person) set p.source = "ds2", p += properties(row) ;<br>
 LOAD CSV WITH HEADERS FROM "file:///ds3.csv" AS row<br>
 CREATE (p:Person) set p.source = "ds3", p += properties(row) ;<br>
 <br>
-Initial db state after load datasets.
+#Initial db state after load datasets.
 <br>
 <img src="entity_resolution/img/initialPersonDataLeftDb.jpg" width="300" />
 <img src="entity_resolution/img/initialPersonData.jpg" width="400" />
 <br>
-Data normalization<br>
+#Data normalization<br>
 MATCH (p:Person) WHERE p.source = "ds1" SET p.m_yob = toInteger(p.yob) ;<br>
 <br>
 MATCH (p:Person)<br>
@@ -31,6 +31,7 @@ SET p.m_fullname = toLower(trim(parts[1]) + ' ' + trim(parts[0]));<br>
 <br>
 MATCH (p:Person) WHERE p.source = "ds3"<br>
 SET p.m_fullname = toLower(trim(p.first_name) + ' ' + trim(p.last_name)) ;<br>
+#Add SAME_AS Relations<br>
 <br>
 MATCH (p1:Person), (p2:Person)<br>
 WHERE p1.source <> p2.source<br>
@@ -41,3 +42,49 @@ passport_match : p1.passport_no =<br>
 p2.passport_no}]->(p2)<br>
 <img src="entity_resolution/img/SameAsInit.jpg" width="800" />
 <br>
+# Add SIMILAR Relations<br>
+MATCH (p1:Person), (p2:Person)<br>
+WHERE NOT (p1)-[:SAME_AS]-(p2)<br>
+AND p1.source <> p2.source<br>
+AND id(p1) > id(p2)<br>
+AND apoc.text.jaroWinklerDistance(p1.m_fullname, p2.m_fullname) < 0.2<br>
+CREATE (p1)-[:SIMILAR { sim_score : 1 -<br>
+apoc.text.jaroWinklerDistance(p1.m_fullname, p2.m_fullname)}]->(p2)<br>
+<img src="entity_resolution/img/SimilarInit.jpg" width="800" />
+<br>
+MATCH (p1:Person)-[sim:SIMILAR]->(p2:Person)<br>
+WHERE p1.ssn <> p2.ssn OR p1.passport_no <> p2.passport_no<br>
+DELETE sim<br>
+<img src="entity_resolution/img/SimilarAfterDel.jpg" width="800" />
+<br>
+:param yob_threshold => 0<br>
+<br>
+MATCH (p1:Person)-[sim:SIMILAR]->(p2:Person)<br>
+WITH sim, abs(p1.m_yob - p2.m_yob) AS yob_diff<br>
+SET sim.sim_score = sim.sim_score * CASE WHEN yob_diff > $yob_threshold<br>
+THEN .9 ELSE 1.1 END<br>
+<br>
+:param sim_score_threshold => 0.9<br>
+<br>
+MATCH (p1:Person)-[sim:SIMILAR]->(p2:Person)<br>
+WHERE sim.sim_score < $sim_score_threshold<br>
+DELETE sim<br>
+<br>
+CALL gds.graph.project(<br>
+'identity-wcc',<br>
+'Person',<br>
+['SAME_AS','SIMILAR']<br>
+)<br>
+<br>
+CALL gds.wcc.stream('identity-wcc')<br>
+YIELD nodeId, componentId<br>
+WITH gds.util.asNode(nodeId) AS person, componentId AS golden_id<br>
+MERGE (pg:PersonMaster { uid: golden_id })<br>
+ON CREATE SET pg.fullname = person.m_fullname,<br>
+pg.ssn = person.ssn, pg.passport_no = person.passport_no<br>
+ON MATCH SET pg.ssn = coalesce(pg.ssn,person.ssn),<br>
+pg.passport_no = coalesce(pg.passport_no,person.passport_no)<br>
+MERGE (pg)-[:HAS_REFERENCE]->(person)<br>
+<img src="entity_resolution/img/Result.jpg" width="800" />
+
+
